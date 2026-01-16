@@ -183,7 +183,7 @@ function updatePlayer(dt) {
   const jumpSpeed = 8;
 
   const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
-  const right = new THREE.Vector3(Math.cos(yyaw), 0, -Math.sin(yaw));
+  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
 
   let move = new THREE.Vector3();
   if (keys["KeyW"]) move.add(forward);
@@ -235,3 +235,4 @@ function loop(now) {
 
 // START
 generateWorld
+
