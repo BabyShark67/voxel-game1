@@ -1,17 +1,18 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8" />
-  <title>Voxel Sandbox</title>
-  <style>
-    body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; }
-    #hud {
-      position: fixed; top: 10px; left: 10px; z-index: 10;
-      background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 14px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Voxel Sandbox</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:sans-serif; }
+#hud {
+  position:fixed; top:10px; left:10px; z-index:10;
+  background:rgba(0,0,0,0.5); padding:8px; border-radius:4px; font-size:14px;
+}
+</style>
 </head>
 <body>
+
 <div id="hud">
   <div>Block: <span id="blockName">Grass</span></div>
   <div>Controls: WASD move, Space jump, 1–3 change block, Left click break, Right click place</div>
@@ -20,219 +21,52 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
 
 <script>
-// BASIC SETUP
+// ---------- BASIC SETUP ----------
 let scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 
 let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-let renderer = new THREE.WebGLRenderer({ antialias: true });
+let renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// LIGHTING
-let ambient = new THREE.AmbientLight(0xffffff, 0.7);
-scene.add(ambient);
-let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-dirLight.position.set(30, 50, 30);
-scene.add(dirLight);
+// ---------- LIGHTING ----------
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+let sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(30,50,30);
+scene.add(sun);
 
-// WORLD DATA
-const WORLD_SIZE = 32;
-const BLOCK_SIZE = 1;
-
+// ---------- BLOCK TYPES ----------
 const BLOCK_TYPES = {
-  1: { name: "Grass", color: 0x3ba635 },
-  2: { name: "Dirt", color: 0x8b5a2b },
-  3: { name: "Stone", color: 0x777777 }
+  1:{name:"Grass", color:0x3ba635},
+  2:{name:"Dirt",  color:0x8b5a2b},
+  3:{name:"Stone", color:0x777777}
 };
-
 let currentBlockId = 1;
 document.getElementById("blockName").textContent = BLOCK_TYPES[currentBlockId].name;
 
-function setBlockType(id) {
-  currentBlockId = id;
-  document.getElementById("blockName").textContent = BLOCK_TYPES[id].name;
-}
-
-// SIMPLE NOISE
-function pseudoNoise(x, z) {
-  let n = x * 374761393 + z * 668265263;
-  n = (n ^ (n >> 13)) * 1274126177;
-  n = (n ^ (n >> 16));
-  return (n & 0xffff) / 0xffff;
-}
-
-// WORLD GENERATION
+// ---------- WORLD ----------
+const WORLD_SIZE = 32;
 let worldBlocks = {};
 let blockMeshes = {};
+const cubeGeo = new THREE.BoxGeometry(1,1,1);
 
 function key(x,y,z){ return `${x},${y},${z}`; }
 
-const cubeGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-
-function createBlockMesh(x,y,z,id) {
-  let mat = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[id].color });
+function createBlock(x,y,z,id){
+  let mat = new THREE.MeshLambertMaterial({color:BLOCK_TYPES[id].color});
   let mesh = new THREE.Mesh(cubeGeo, mat);
-  mesh.position.set(x, y, z);
+  mesh.position.set(x,y,z);
   scene.add(mesh);
   return mesh;
 }
 
-function setBlock(x,y,z,id) {
-  const k = key(x,y,z);
-  if (blockMeshes[k]) {
-    scene.remove(blockMeshes[k]);
-    delete blockMeshes[k];
-  }
+function setBlock(x,y,z,id){
+  let k = key(x,y,z);
+  if(blockMeshes[k]) scene.remove(blockMeshes[k]);
   worldBlocks[k] = id;
-  blockMeshes[k] = createBlockMesh(x,y,z,id);
+  blockMeshes[k] = createBlock(x,y,z,id);
 }
 
-function generateWorld() {
-  for (let x = -WORLD_SIZE/2; x < WORLD_SIZE/2; x++) {
-    for (let z = -WORLD_SIZE/2; z < WORLD_SIZE/2; z++) {
-      let h = Math.floor(4 + pseudoNoise(x,z) * 6);
-      for (let y = 0; y <= h; y++) {
-        let id = (y === h) ? 1 : (y > h - 3 ? 2 : 3);
-        setBlock(x, y, z, id);
-      }
-    }
-  }
-}
-
-// PLAYER
-let player = {
-  x: 0,
-  y: 20,
-  z: 0,
-  vx: 0,
-  vy: 0,
-  vz: 0,
-  onGround: false
-};
-
-camera.position.set(0, 22, 5);
-
-// INPUT
-let keys = {};
-window.addEventListener("keydown", e => {
-  keys[e.code] = true;
-  if (e.code === "Digit1") setBlockType(1);
-  if (e.code === "Digit2") setBlockType(2);
-  if (e.code === "Digit3") setBlockType(3);
-});
-window.addEventListener("keyup", e => keys[e.code] = false);
-
-// MOUSE LOOK
-let yaw = 0;
-let pitch = 0;
-let isPointerLocked = false;
-
-document.body.addEventListener("click", () => {
-  if (!isPointerLocked) renderer.domElement.requestPointerLock();
-});
-
-document.addEventListener("pointerlockchange", () => {
-  isPointerLocked = (document.pointerLockElement === renderer.domElement);
-});
-
-document.addEventListener("mousemove", e => {
-  if (!isPointerLocked) return;
-  yaw -= e.movementX * 0.002;
-  pitch -= e.movementY * 0.002;
-  pitch = Math.max(-1.4, Math.min(1.4, pitch));
-});
-
-// RAYCAST
-let raycaster = new THREE.Raycaster();
-
-function getTarget(addOffset=false) {
-  raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
-  const hits = raycaster.intersectObjects(Object.values(blockMeshes));
-  if (hits.length === 0) return null;
-  const hit = hits[0];
-  const p = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(addOffset ? 0.5 : -0.5));
-  return {
-    x: Math.round(p.x),
-    y: Math.round(p.y),
-    z: Math.round(p.z)
-  };
-}
-
-window.addEventListener("mousedown", e => {
-  if (e.button === 0) {
-    const t = getTarget(false);
-    if (t) {
-      const k = key(t.x,t.y,t.z);
-      if (blockMeshes[k]) {
-        scene.remove(blockMeshes[k]);
-        delete blockMeshes[k];
-      }
-    }
-  } else if (e.button === 2) {
-    const t = getTarget(true);
-    if (t) setBlock(t.x,t.y,t.z,currentBlockId);
-  }
-});
-window.addEventListener("contextmenu", e => e.preventDefault());
-
-// MOVEMENT
-function updatePlayer(dt) {
-  const speed = 6;
-  const gravity = -20;
-  const jumpSpeed = 8;
-
-  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
-  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-
-  let move = new THREE.Vector3();
-  if (keys["KeyW"]) move.add(forward);
-  if (keys["KeyS"]) move.sub(forward);
-  if (keys["KeyA"]) move.sub(right);
-  if (keys["KeyD"]) move.add(right);
-  if (move.length() > 0) move.normalize();
-
-  player.vx = move.x * speed;
-  player.vz = move.z * speed;
-
-  player.vy += gravity * dt;
-
-  if (keys["Space"] && player.onGround) {
-    player.vy = jumpSpeed;
-    player.onGround = false;
-  }
-
-  player.x += player.vx * dt;
-  player.y += player.vy * dt;
-  player.z += player.vz * dt;
-
-  if (player.y < 5) {
-    player.y = 5;
-    player.vy = 0;
-    player.onGround = true;
-  }
-
-  const eye = new THREE.Vector3(player.x, player.y + 1.7, player.z);
-  const look = new THREE.Vector3(
-    Math.sin(yaw) * Math.cos(pitch),
-    Math.sin(pitch),
-    Math.cos(yaw) * Math.cos(pitch)
-  );
-  camera.position.copy(eye);
-  camera.lookAt(eye.clone().add(look));
-}
-
-// MAIN LOOP
-let last = performance.now();
-function loop(now) {
-  const dt = (now - last) / 1000;
-  last = now;
-
-  updatePlayer(dt);
-  renderer.render(scene, camera);
-  requestAnimationFrame(loop);
-}
-
-// START
-generateWorld
-
+function noise(x,z){
+  let n =
