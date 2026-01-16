@@ -1,0 +1,723 @@
+﻿<!DOCTYPE html>
+<html>
+<head><!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Mini Voxel Sandbox</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; }
+    #hud {
+      position: fixed; top: 10px; left: 10px; z-index: 10;
+      background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div>Health: <span id="health">100</span></div>
+  <div>Hunger: <span id="hunger">100</span></div>
+  <div>Block: <span id="blockName">Grass</span></div>
+  <div>Controls: WASD move, Space jump, 1–3 change block, Left click break, Right click place</div>
+</div>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+
+
+<script>
+/* ---------- BASIC SETUP ---------- */
+let scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+
+let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+let renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+
+/* ---------- LIGHTING ---------- */
+let ambient = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambient);
+let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(30, 50, 30);
+scene.add(dirLight);
+
+
+/* ---------- VOXEL WORLD DATA ---------- */
+const CHUNK_SIZE = 16;
+const WORLD_SIZE = 32; // 32x32 area
+const BLOCK_SIZE = 1;
+
+
+const BLOCK_TYPES = {
+  0: { name: "Air", color: null },
+  1: { name: "Grass", color: 0x3ba635 },
+  2: { name: "Dirt", color: 0x8b5a2b },
+  3: { name: "Stone", color: 0x777777 }
+};
+
+
+let currentBlockId = 1;
+const blockNameSpan = document.getElementById("blockName");
+
+
+function setBlockType(id) {
+  currentBlockId = id;
+  blockNameSpan.textContent = BLOCK_TYPES[id].name;
+}
+
+
+/* ---------- SIMPLE NOISE (FAKE BIOMES) ---------- */
+function pseudoNoise(x, z) {
+  // Very simple hash-based noise
+  let n = x * 374761393 + z * 668265263;
+  n = (n ^ (n >> 13)) * 1274126177;
+  n = (n ^ (n >> 16));
+  return (n & 0xffff) / 0xffff; // 0..1
+}
+
+
+/* ---------- WORLD GENERATION ---------- */
+let worldBlocks = {}; // key: "x,y,z" -> blockId
+let blockMeshes = {}; // same key -> mesh
+
+
+function key(x,y,z){ return `${x},${y},${z}`; }
+
+
+function generateWorld() {
+  for (let x = -WORLD_SIZE/2; x < WORLD_SIZE/2; x++) {
+    for (let z = -WORLD_SIZE/2; z < WORLD_SIZE/2; z++) {
+      let hNoise = pseudoNoise(x, z);
+      let height = Math.floor(4 + hNoise * 6); // 4..10
+
+
+      for (let y = 0; y <= height; y++) {
+        let id;
+        if (y === height) id = 1;         // grass
+        else if (y > height - 3) id = 2;  // dirt
+        else id = 3;                      // stone
+        setBlock(x, y, z, id, false);
+      }
+    }
+  }
+}
+
+
+/* ---------- BLOCK CREATION / REMOVAL ---------- */
+const cubeGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+
+
+function createBlockMesh(x,y,z,id) {
+  let mat = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[id].color });
+  let mesh = new THREE.Mesh(cubeGeo, mat);
+  mesh.position.set(x * BLOCK_SIZE, y * BLOCK_SIZE, z * BLOCK_SIZE);
+  scene.add(mesh);
+  return mesh;
+}
+
+
+function setBlock(x,y,z,id,updateMesh=true) {
+  const k = key(x,y,z);
+  if (id === 0) {
+    // remove
+    if (blockMeshes[k]) {
+      scene.remove(blockMeshes[k]);
+      delete blockMeshes[k];
+    }
+    delete worldBlocks[k];
+  } else {
+    worldBlocks[k] = id;
+    if (updateMesh) {
+      if (blockMeshes[k]) scene.remove(blockMeshes[k]);
+      blockMeshes[k] = createBlockMesh(x,y,z,id);
+    }
+  }
+}
+
+
+function getBlockId(x,y,z) {
+  return worldBlocks[key(x,y,z)] || 0;
+}
+
+
+/* ---------- PLAYER ---------- */
+let player = {
+  x: 0,
+  y: 15,
+  z: 0,
+  vx: 0,
+  vy: 0,
+  vz: 0,
+  onGround: false
+};
+
+
+camera.position.set(player.x, player.y + 1.7, player.z + 5);
+camera.lookAt(player.x, player.y + 1.7, player.z);
+
+
+/* ---------- INPUT ---------- */
+let keys = {};
+window.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Digit1") setBlockType(1);
+  if (e.code === "Digit2") setBlockType(2);
+  if (e.code === "Digit3") setBlockType(3);
+});
+window.addEventListener("keyup", e => keys[e.code] = false);
+
+
+/* ---------- RAYCASTING FOR BLOCK INTERACTION ---------- */
+let raycaster = new THREE.Raycaster();
+let mouse = new THREE.Vector2();
+
+
+function getTargetBlock(addOffset=false) {
+  raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+  const intersects = raycaster.intersectObjects(Object.values(blockMeshes));
+  if (intersects.length === 0) return null;
+  const hit = intersects[0];
+  const p = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(addOffset ? 0.5 : -0.5));
+  const x = Math.round(p.x / BLOCK_SIZE);
+  const y = Math.round(p.y / BLOCK_SIZE);
+  const z = Math.round(p.z / BLOCK_SIZE);
+  return { x,y,z };
+}
+
+
+window.addEventListener("mousedown", e => {
+  if (e.button === 0) { // left: break
+    const t = getTargetBlock(false);
+    if (t) setBlock(t.x, t.y, t.z, 0);
+  } else if (e.button === 2) { // right: place
+    const t = getTargetBlock(true);
+    if (t) setBlock(t.x, t.y, t.z, currentBlockId);
+  }
+});
+window.addEventListener("contextmenu", e => e.preventDefault());
+
+
+/* ---------- SIMPLE CAMERA / PLAYER MOVEMENT ---------- */
+let yaw = 0;
+let pitch = 0;
+let isPointerLocked = false;
+
+
+document.body.addEventListener("click", () => {
+  if (!isPointerLocked) {
+    renderer.domElement.requestPointerLock();
+  }
+});
+
+
+document.addEventListener("pointerlockchange", () => {
+  isPointerLocked = (document.pointerLockElement === renderer.domElement);
+});
+
+
+document.addEventListener("mousemove", e => {
+  if (!isPointerLocked) return;
+  const sensitivity = 0.002;
+  yaw -= e.movementX * sensitivity;
+  pitch -= e.movementY * sensitivity;
+  pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, pitch));
+});
+
+
+function updatePlayer(dt) {
+  const speed = 6;
+  const gravity = -20;
+  const jumpSpeed = 8;
+
+
+  // Direction from yaw
+  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+
+
+  let moveDir = new THREE.Vector3();
+  if (keys["KeyW"]) moveDir.add(forward);
+  if (keys["KeyS"]) moveDir.sub(forward);
+  if (keys["KeyA"]) moveDir.sub(right);
+  if (keys["KeyD"]) moveDir.add(right);
+  if (moveDir.length() > 0) moveDir.normalize();
+
+
+  player.vx = moveDir.x * speed;
+  player.vz = moveDir.z * speed;
+
+
+  // Gravity
+  player.vy += gravity * dt;
+
+
+  // Jump
+  if (keys["Space"] && player.onGround) {
+    player.vy = jumpSpeed;
+    player.onGround = false;
+  }
+
+
+  // Apply movement
+  let newX = player.x + player.vx * dt;
+  let newY = player.y + player.vy * dt;
+  let newZ = player.z + player.vz * dt;
+
+
+  // Very simple collision: check block at feet
+  function isSolidAt(x,y,z) {
+    return getBlockId(Math.floor(x), Math.floor(y), Math.floor(z)) !== 0;
+  }
+
+
+  // XZ collision
+  if (!isSolidAt(newX, player.y, player.z)) player.x = newX;
+  if (!isSolidAt(player.x, player.y, newZ)) player.z = newZ;
+
+
+  // Y collision
+  if (!isSolidAt(player.x, newY, player.z)) {
+    player.y = newY;
+    player.onGround = false;
+  } else {
+    if (player.vy < 0) {
+      player.onGround = true;
+    }
+    player.vy = 0;
+  }
+
+
+  // Update camera
+  const eye = new THREE.Vector3(player.x, player.y + 1.7, player.z);
+  const lookDir = new THREE.Vector3(
+    Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    Math.cos(yaw) * Math.cos(pitch)
+  );
+  camera.position.copy(eye);
+  camera.lookAt(eye.clone().add(lookDir));
+}
+
+
+/* ---------- SURVIVAL: HEALTH & HUNGER ---------- */
+let health = 100;
+let hunger = 100;
+const healthSpan = document.getElementById("health");
+const hungerSpan = document.getElementById("hunger");
+
+
+let survivalTimer = 0;
+
+
+function updateSurvival(dt) {
+  survivalTimer += dt;
+  if (survivalTimer > 1) { // every second
+    survivalTimer = 0;
+    hunger = Math.max(0, hunger - 1);
+    if (hunger === 0) {
+      health = Math.max(0, health - 2);
+    } else if (hunger > 60 && health < 100) {
+      health = Math.min(100, health + 1); // regen
+    }
+    healthSpan.textContent = health;
+    hungerSpan.textContent = hunger;
+  }
+}
+
+
+/* ---------- MAIN LOOP ---------- */
+let lastTime = performance.now();
+
+
+function loop(now) {
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+
+  updatePlayer(dt);
+  updateSurvival(dt);
+
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+
+/* ---------- START ---------- */
+generateWorld();
+setBlockType(1);
+requestAnimationFrame(loop);
+
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
+
+
+
+
+  <meta charset="UTF-8" />
+  <title>Mini Voxel Sandbox</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; }
+    #hud {
+      position: fixed; top: 10px; left: 10px; z-index: 10;
+      background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px; font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <div>Health: <span id="health">100</span></div>
+  <div>Hunger: <span id="hunger">100</span></div>
+  <div>Block: <span id="blockName">Grass</span></div>
+  <div>Controls: WASD move, Space jump, 1–3 change block, Left click break, Right click place</div>
+</div>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+
+
+<script>
+/* ---------- BASIC SETUP ---------- */
+let scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+
+let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+let renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+
+/* ---------- LIGHTING ---------- */
+let ambient = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambient);
+let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(30, 50, 30);
+scene.add(dirLight);
+
+
+/* ---------- VOXEL WORLD DATA ---------- */
+const CHUNK_SIZE = 16;
+const WORLD_SIZE = 32; // 32x32 area
+const BLOCK_SIZE = 1;
+
+
+const BLOCK_TYPES = {
+  0: { name: "Air", color: null },
+  1: { name: "Grass", color: 0x3ba635 },
+  2: { name: "Dirt", color: 0x8b5a2b },
+  3: { name: "Stone", color: 0x777777 }
+};
+
+
+let currentBlockId = 1;
+const blockNameSpan = document.getElementById("blockName");
+
+
+function setBlockType(id) {
+  currentBlockId = id;
+  blockNameSpan.textContent = BLOCK_TYPES[id].name;
+}
+
+
+/* ---------- SIMPLE NOISE (FAKE BIOMES) ---------- */
+function pseudoNoise(x, z) {
+  // Very simple hash-based noise
+  let n = x * 374761393 + z * 668265263;
+  n = (n ^ (n >> 13)) * 1274126177;
+  n = (n ^ (n >> 16));
+  return (n & 0xffff) / 0xffff; // 0..1
+}
+
+
+/* ---------- WORLD GENERATION ---------- */
+let worldBlocks = {}; // key: "x,y,z" -> blockId
+let blockMeshes = {}; // same key -> mesh
+
+
+function key(x,y,z){ return `${x},${y},${z}`; }
+
+
+function generateWorld() {
+  for (let x = -WORLD_SIZE/2; x < WORLD_SIZE/2; x++) {
+    for (let z = -WORLD_SIZE/2; z < WORLD_SIZE/2; z++) {
+      let hNoise = pseudoNoise(x, z);
+      let height = Math.floor(4 + hNoise * 6); // 4..10
+
+
+      for (let y = 0; y <= height; y++) {
+        let id;
+        if (y === height) id = 1;         // grass
+        else if (y > height - 3) id = 2;  // dirt
+        else id = 3;                      // stone
+        setBlock(x, y, z, id, false);
+      }
+    }
+  }
+}
+
+
+/* ---------- BLOCK CREATION / REMOVAL ---------- */
+const cubeGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+
+
+function createBlockMesh(x,y,z,id) {
+  let mat = new THREE.MeshLambertMaterial({ color: BLOCK_TYPES[id].color });
+  let mesh = new THREE.Mesh(cubeGeo, mat);
+  mesh.position.set(x * BLOCK_SIZE, y * BLOCK_SIZE, z * BLOCK_SIZE);
+  scene.add(mesh);
+  return mesh;
+}
+
+
+function setBlock(x,y,z,id,updateMesh=true) {
+  const k = key(x,y,z);
+  if (id === 0) {
+    // remove
+    if (blockMeshes[k]) {
+      scene.remove(blockMeshes[k]);
+      delete blockMeshes[k];
+    }
+    delete worldBlocks[k];
+  } else {
+    worldBlocks[k] = id;
+    if (updateMesh) {
+      if (blockMeshes[k]) scene.remove(blockMeshes[k]);
+      blockMeshes[k] = createBlockMesh(x,y,z,id);
+    }
+  }
+}
+
+
+function getBlockId(x,y,z) {
+  return worldBlocks[key(x,y,z)] || 0;
+}
+
+
+/* ---------- PLAYER ---------- */
+let player = {
+  x: 0,
+  y: 15,
+  z: 0,
+  vx: 0,
+  vy: 0,
+  vz: 0,
+  onGround: false
+};
+
+
+camera.position.set(player.x, player.y + 1.7, player.z + 5);
+camera.lookAt(player.x, player.y + 1.7, player.z);
+
+
+/* ---------- INPUT ---------- */
+let keys = {};
+window.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Digit1") setBlockType(1);
+  if (e.code === "Digit2") setBlockType(2);
+  if (e.code === "Digit3") setBlockType(3);
+});
+window.addEventListener("keyup", e => keys[e.code] = false);
+
+
+/* ---------- RAYCASTING FOR BLOCK INTERACTION ---------- */
+let raycaster = new THREE.Raycaster();
+let mouse = new THREE.Vector2();
+
+
+function getTargetBlock(addOffset=false) {
+  raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+  const intersects = raycaster.intersectObjects(Object.values(blockMeshes));
+  if (intersects.length === 0) return null;
+  const hit = intersects[0];
+  const p = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(addOffset ? 0.5 : -0.5));
+  const x = Math.round(p.x / BLOCK_SIZE);
+  const y = Math.round(p.y / BLOCK_SIZE);
+  const z = Math.round(p.z / BLOCK_SIZE);
+  return { x,y,z };
+}
+
+
+window.addEventListener("mousedown", e => {
+  if (e.button === 0) { // left: break
+    const t = getTargetBlock(false);
+    if (t) setBlock(t.x, t.y, t.z, 0);
+  } else if (e.button === 2) { // right: place
+    const t = getTargetBlock(true);
+    if (t) setBlock(t.x, t.y, t.z, currentBlockId);
+  }
+});
+window.addEventListener("contextmenu", e => e.preventDefault());
+
+
+/* ---------- SIMPLE CAMERA / PLAYER MOVEMENT ---------- */
+let yaw = 0;
+let pitch = 0;
+let isPointerLocked = false;
+
+
+document.body.addEventListener("click", () => {
+  if (!isPointerLocked) {
+    renderer.domElement.requestPointerLock();
+  }
+});
+
+
+document.addEventListener("pointerlockchange", () => {
+  isPointerLocked = (document.pointerLockElement === renderer.domElement);
+});
+
+
+document.addEventListener("mousemove", e => {
+  if (!isPointerLocked) return;
+  const sensitivity = 0.002;
+  yaw -= e.movementX * sensitivity;
+  pitch -= e.movementY * sensitivity;
+  pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, pitch));
+});
+
+
+function updatePlayer(dt) {
+  const speed = 6;
+  const gravity = -20;
+  const jumpSpeed = 8;
+
+
+  // Direction from yaw
+  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+
+
+  let moveDir = new THREE.Vector3();
+  if (keys["KeyW"]) moveDir.add(forward);
+  if (keys["KeyS"]) moveDir.sub(forward);
+  if (keys["KeyA"]) moveDir.sub(right);
+  if (keys["KeyD"]) moveDir.add(right);
+  if (moveDir.length() > 0) moveDir.normalize();
+
+
+  player.vx = moveDir.x * speed;
+  player.vz = moveDir.z * speed;
+
+
+  // Gravity
+  player.vy += gravity * dt;
+
+
+  // Jump
+  if (keys["Space"] && player.onGround) {
+    player.vy = jumpSpeed;
+    player.onGround = false;
+  }
+
+
+  // Apply movement
+  let newX = player.x + player.vx * dt;
+  let newY = player.y + player.vy * dt;
+  let newZ = player.z + player.vz * dt;
+
+
+  // Very simple collision: check block at feet
+  function isSolidAt(x,y,z) {
+    return getBlockId(Math.floor(x), Math.floor(y), Math.floor(z)) !== 0;
+  }
+
+
+  // XZ collision
+  if (!isSolidAt(newX, player.y, player.z)) player.x = newX;
+  if (!isSolidAt(player.x, player.y, newZ)) player.z = newZ;
+
+
+  // Y collision
+  if (!isSolidAt(player.x, newY, player.z)) {
+    player.y = newY;
+    player.onGround = false;
+  } else {
+    if (player.vy < 0) {
+      player.onGround = true;
+    }
+    player.vy = 0;
+  }
+
+
+  // Update camera
+  const eye = new THREE.Vector3(player.x, player.y + 1.7, player.z);
+  const lookDir = new THREE.Vector3(
+    Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    Math.cos(yaw) * Math.cos(pitch)
+  );
+  camera.position.copy(eye);
+  camera.lookAt(eye.clone().add(lookDir));
+}
+
+
+/* ---------- SURVIVAL: HEALTH & HUNGER ---------- */
+let health = 100;
+let hunger = 100;
+const healthSpan = document.getElementById("health");
+const hungerSpan = document.getElementById("hunger");
+
+
+let survivalTimer = 0;
+
+
+function updateSurvival(dt) {
+  survivalTimer += dt;
+  if (survivalTimer > 1) { // every second
+    survivalTimer = 0;
+    hunger = Math.max(0, hunger - 1);
+    if (hunger === 0) {
+      health = Math.max(0, health - 2);
+    } else if (hunger > 60 && health < 100) {
+      health = Math.min(100, health + 1); // regen
+    }
+    healthSpan.textContent = health;
+    hungerSpan.textContent = hunger;
+  }
+}
+
+
+/* ---------- MAIN LOOP ---------- */
+let lastTime = performance.now();
+
+
+function loop(now) {
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+
+  updatePlayer(dt);
+  updateSurvival(dt);
+
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+
+/* ---------- START ---------- */
+generateWorld();
+setBlockType(1);
+requestAnimationFrame(loop);
+
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
